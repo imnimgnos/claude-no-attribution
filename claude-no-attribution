@@ -1,0 +1,362 @@
+#!/usr/bin/env bash
+# claude-no-attribution — Claude Code가 git 커밋 · PR에 붙이는 표시를 한 번에 끄는 대화형 스크립트
+#
+#   끄는 것
+#     - 공동 작성자 줄(Co-Authored-By · Generated with Claude Code): attribution.commit = "", attribution.pr = ""
+#       + 옛 버전용 includeCoAuthoredBy = false(새 버전은 commit · pr이 있으면 이 값을 무시한다)
+#     - 세션 링크(커밋의 "Claude-Session: …", PR 끝의 링크): attribution.sessionUrl = false
+#
+#   어디에
+#     1. 이 컴퓨터       ~/.claude/settings.json(CLAUDE_CONFIG_DIR가 있으면 그 폴더)
+#     2. SSH 호스트      ~/.ssh/config(Include 포함)의 호스트를 점검해 Claude Code(~/.claude)가 있는 곳
+#                        (키로 바로 붙는 곳은 자동 점검, 안 되면 비밀번호로 시도, 목록에 없는 호스트도 더할 수 있다)
+#     3. 저장소(선택)    <저장소>/.claude/settings.json — 클라우드(claude.ai/code) 세션은 저장소 설정만 읽는다
+#
+#   쓰는 법
+#     claude-no-attribution                 차례로 물어 가며 적용(기본)
+#     claude-no-attribution -n              바꾸지 않고 무엇이 바뀔지만
+#     claude-no-attribution -y              묻지 않고: 이 컴퓨터 + 키로 붙는 호스트 중 바꿀 곳
+#     claude-no-attribution host1 host2     SSH 점검을 이 호스트들로만(alias 또는 user@host:port)
+#     claude-no-attribution --no-ssh        SSH 단계를 건너뜀
+#     claude-no-attribution --project DIR   이 저장소에도(여러 번 줄 수 있다)
+#
+#   지키는 것
+#     - 다른 설정은 그대로 둔다. 처음 바꿀 때 원본을 settings.json.bak-attribution으로 남긴다.
+#     - 심볼릭 링크면 실제 파일을 고친다. JSON이 깨져 있으면 쓰지 않는다. 여러 번 돌려도 결과가 같다.
+#     - attribution이 이미 false(전부 끔)면 그대로 둔다. ~/.claude가 없는 곳은 건너뛴다.
+#     - 각 컴퓨터에 python3(없으면 python, py -3)가 있어야 한다. 실행 중인 Claude Code 세션도 바로 반영된다.
+#     - 관리자 정책(managed-settings.json)이 따로 정한 값은 이 스크립트가 바꾸지 못한다.
+
+set -u
+
+# ---------------------------------------------------------------- 설정 하나를 고치는 부분
+# 이 컴퓨터에서도, ssh로 보낸 호스트에서도 같은 코드가 돈다. 한 줄 "상태<TAB>설명"을 찍는다:
+#   same 이미 적용 · change 바꿀 예정(미리보기) · done 바꿈 · skip ~/.claude 없음 · off 이미 전부 끔 · error 쓰지 않음
+read -r -d '' MERGE_PY <<'PY'
+import json, os, shutil, socket, sys, tempfile
+args = sys.argv[1:]
+dry = '--dry-run' in args
+project = '--project' in args
+rest = [a for a in args if not a.startswith('--')]
+def out(status, msg):
+    print(f'{status}\t{msg}'); sys.exit(1 if status == 'error' else 0)
+if rest:
+    p = os.path.abspath(os.path.expanduser(rest[0])); where = p
+else:
+    base = os.environ.get('CLAUDE_CONFIG_DIR') or os.path.join(os.path.expanduser('~'), '.claude')
+    p = os.path.join(base, 'settings.json'); where = socket.gethostname()
+folder = os.path.dirname(p)
+if not os.path.isdir(folder):
+    if not project:
+        out('skip', f'{where}: {folder} 없음(Claude Code를 쓰지 않는 곳)')
+    if not os.path.isdir(os.path.dirname(folder)):
+        out('error', f'{where}: 폴더가 없음')
+    if not dry:
+        os.makedirs(folder)
+real = os.path.realpath(p)
+d = {}
+if os.path.exists(real):
+    try:
+        raw = open(real, encoding='utf-8').read()
+        d = json.loads(raw) if raw.strip() else {}
+    except (OSError, ValueError) as e:
+        out('error', f'{where}: settings.json을 읽지 못함({e}), 쓰지 않음')
+    if not isinstance(d, dict):
+        out('error', f'{where}: settings.json이 객체가 아님, 쓰지 않음')
+a = d.get('attribution')
+if a is False:
+    out('off', f'{where}: attribution=false(이미 전부 끔)')
+before = (json.dumps(a, ensure_ascii=False), d.get('includeCoAuthoredBy'))
+a = dict(a) if isinstance(a, dict) else {}
+a['sessionUrl'] = False
+a['commit'] = ''
+a['pr'] = ''
+after = (json.dumps(a, ensure_ascii=False), False)
+if after == before:
+    out('same', f'{where}: 이미 적용됨')
+change = f'attribution {before[0]} -> {after[0]}, includeCoAuthoredBy {before[1]} -> False'
+if dry:
+    out('change', f'{where}: 바꿀 예정 · {change}')
+d['attribution'] = a
+d['includeCoAuthoredBy'] = False
+try:
+    if os.path.exists(real):
+        bak = p + '.bak-attribution'
+        if not os.path.exists(bak):
+            shutil.copy2(real, bak)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(real), prefix='.settings.', suffix='.json')
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        json.dump(d, f, ensure_ascii=False, indent=2)
+        f.write('\n')
+    if os.path.exists(real):
+        shutil.copymode(real, tmp)
+    os.replace(tmp, real)
+    json.load(open(real, encoding='utf-8'))
+except OSError as e:
+    out('error', f'{where}: 쓰지 못함({e})')
+out('done', f'{where}: 바꿈 · {change}')
+PY
+
+# ---------------------------------------------------------------- ~/.ssh/config의 호스트
+# 와일드카드 · 부정 패턴은 빼고, 같은 곳(HostName · User · Port)을 가리키는 별칭은 하나만
+read -r -d '' HOSTS_PY <<'PY'
+import glob, os, re, subprocess
+files, seen, names = [os.path.expanduser('~/.ssh/config')], set(), []
+i = 0
+while i < len(files):
+    f = files[i]; i += 1
+    try:
+        text = open(f, encoding='utf-8', errors='ignore').read()
+    except OSError:
+        continue
+    for line in text.splitlines():
+        m = re.match(r'\s*Include\s+(.+?)\s*$', line, re.I)
+        if m:
+            for part in re.findall(r'"[^"]+"|\S+', m.group(1)):
+                pat = os.path.expanduser(part.strip('"'))
+                if not os.path.isabs(pat):
+                    pat = os.path.join(os.path.expanduser('~/.ssh'), pat)
+                files += sorted(glob.glob(pat))
+        m = re.match(r'\s*Host\s+(.+)$', line, re.I)
+        if m:
+            for h in m.group(1).split():
+                if any(c in h for c in '*?!') or h in seen:
+                    continue
+                seen.add(h); names.append(h)
+keys = set()
+for h in names:
+    cfg = subprocess.run(['ssh', '-G', h], capture_output=True, text=True).stdout
+    kv = dict(l.split(' ', 1) for l in cfg.splitlines() if ' ' in l)
+    key = (kv.get('hostname'), kv.get('user'), kv.get('port'))
+    if key in keys:
+        continue
+    keys.add(key)
+    print(h)
+PY
+
+# ---------------------------------------------------------------- 도움 함수
+usage() { sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'; }
+say() { printf '%s\n' "$*"; }
+line() { say "------------------------------------------------------------------------"; }
+step() { say ""; line; say "$*"; line; }
+
+# 묻기: 질문을 터미널에 쓰고 터미널에서 읽는다(-y거나 터미널이 없으면 기본값)
+ask() {
+  local q=$1 def=${2-}
+  if [ "$YES" = 1 ] || [ -z "$TTY" ]; then REPLY=$def; say "$q $def"; return; fi
+  printf '%s ' "$q" > "$TTY"
+  IFS= read -r REPLY < "$TTY" || REPLY=""
+  [ -z "$REPLY" ] && REPLY=$def
+  return 0
+}
+confirm() {   # confirm "질문" y|n
+  local hint="[y/N]"; [ "$2" = y ] && hint="[Y/n]"
+  ask "$1 $hint" "$2"
+  case "$REPLY" in [Yy]*|예|네|응|ㅇ) return 0 ;; *) return 1 ;; esac
+}
+status_of() { printf '%s' "${1%%$'\t'*}"; }
+message_of() { printf '%s' "${1#*$'\t'}"; }
+
+# 원격에서 MERGE_PY를 돌린다: run_remote batch|interactive 대상 [--dry-run]. 결과 줄은 RESULT, ssh 오류는 SSHERR
+# 대상: ssh 별칭 또는 user@host[:port]. 같은 접속을 다시 쓰므로(ControlMaster) 비밀번호는 호스트당 한 번만 묻는다
+run_remote() {
+  local mode=$1 target=$2; shift 2
+  local dest=$target port="" py rc out err
+  case "$target" in *@*:*|*:[0-9]*) [ "${target##*:}" -eq "${target##*:}" ] 2>/dev/null && { port=${target##*:}; dest=${target%:*}; } ;; esac
+  local -a o=(-o ConnectTimeout=8 -o ServerAliveInterval=3 -o ServerAliveCountMax=3
+              -o ControlMaster=auto -o "ControlPath=$WORK/cm-%C" -o ControlPersist=90)
+  [ -n "$port" ] && o+=(-p "$port")
+  [ "$mode" = batch ] && o+=(-o BatchMode=yes)
+  RESULT="" SSHERR=""
+  for py in python3 python "py -3"; do
+    err="$WORK/err.$$.$RANDOM"
+    out=$(ssh "${o[@]}" "$dest" "$py - $*" <<<"$MERGE_PY" 2>"$err"); rc=$?
+    SSHERR=$(grep -v '^[[:space:]│╭╰]' "$err" | grep -v '^[[:space:]]*$' | tail -1); rm -f "$err"
+    RESULT=$(printf '%s\n' "$out" | grep -E $'^(same|change|done|skip|off|error)\t' | tail -1)
+    [ -n "$RESULT" ] && return 0
+    [ $rc -eq 255 ] && return 255        # 접속 · 인증 실패
+  done
+  SSHERR=${SSHERR:-"python3 · python이 없음"}
+  return 1
+}
+
+# ---------------------------------------------------------------- 옵션
+YES=0 DRY="" NOSSH=0
+PROJECTS=() ONLY=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n|--dry-run) DRY="--dry-run" ;;
+    -y|--yes) YES=1 ;;
+    --no-ssh) NOSSH=1 ;;
+    --project) [ $# -ge 2 ] || { say "--project 뒤에 저장소 폴더를 주세요" >&2; exit 2; }; PROJECTS+=("$2"); shift ;;
+    -h|--help) usage; exit 0 ;;
+    -*) say "모르는 옵션: $1 (도움말: -h)" >&2; exit 2 ;;
+    *) ONLY+=("$1") ;;
+  esac
+  shift
+done
+
+TTY=""
+if [ "$YES" = 0 ] && { : < /dev/tty; } 2>/dev/null; then TTY=/dev/tty; fi
+if [ -z "$TTY" ] && [ "$YES" = 0 ] && [ -z "$DRY" ]; then
+  say "터미널이 없어 물어볼 수 없습니다. 묻지 않고 적용하려면 -y, 미리보기만 하려면 -n을 주세요." >&2; exit 2
+fi
+# 이 컴퓨터의 파이썬(3.7 이상): python3, 없으면 python
+PY=""
+for c in python3 python; do
+  if command -v "$c" >/dev/null 2>&1 && "$c" -c 'import sys; sys.exit(sys.version_info < (3, 7))' 2>/dev/null; then PY=$c; break; fi
+done
+[ -n "$PY" ] || { say "이 컴퓨터에 Python 3.7 이상(python3 또는 python)이 필요합니다." >&2; exit 1; }
+WORK=$(mktemp -d /tmp/cna.XXXXXX) || exit 1
+trap 'rm -rf "$WORK"' EXIT
+CHANGED=0 FAILED=0
+
+say "Claude Code가 커밋 · PR에 붙이는 공동 작성자 줄과 세션 링크를 끕니다."
+[ -n "$DRY" ] && say "(미리보기: 아무것도 바꾸지 않습니다)"
+
+# ---------------------------------------------------------------- 1. 이 컴퓨터
+step "1. 이 컴퓨터"
+r=$("$PY" -c "$MERGE_PY" --dry-run)
+say "  $(message_of "$r")"
+if [ "$(status_of "$r")" = change ] && [ -z "$DRY" ]; then
+  if confirm "  이 컴퓨터에 적용할까요?" y; then
+    r=$("$PY" -c "$MERGE_PY"); say "  $(message_of "$r")"
+    [ "$(status_of "$r")" = done ] && CHANGED=$((CHANGED + 1)) || FAILED=$((FAILED + 1))
+  fi
+fi
+
+# ---------------------------------------------------------------- 2. SSH 호스트
+if [ "$NOSSH" = 0 ] && command -v ssh >/dev/null 2>&1; then
+  step "2. SSH 호스트"
+  HOSTS=()
+  if [ ${#ONLY[@]} -gt 0 ]; then
+    HOSTS=("${ONLY[@]}")
+  elif [ -f "$HOME/.ssh/config" ]; then
+    while IFS= read -r h; do [ -n "$h" ] && HOSTS+=("$h"); done < <("$PY" -c "$HOSTS_PY")
+  fi
+  if [ ${#HOSTS[@]} -eq 0 ]; then
+    say "  ~/.ssh/config에 호스트가 없습니다."
+  else
+    say "  호스트 ${#HOSTS[@]}곳을 키로 접속해 점검합니다(비밀번호는 묻지 않음, 곳당 최대 8초)…"
+    i=0
+    for h in "${HOSTS[@]}"; do
+      ( run_remote batch "$h" --dry-run; rc=$?
+        printf '%s\n%s\n%s\n' "$rc" "$RESULT" "$SSHERR" > "$WORK/probe.$i" ) &
+      i=$((i + 1))
+    done
+    wait
+    # 점검 결과 표
+    STAT=() MSG=() TODO=() RETRY=()
+    i=0
+    for h in "${HOSTS[@]}"; do
+      { IFS= read -r rc; IFS= read -r res; IFS= read -r err; } < "$WORK/probe.$i"
+      if [ "$rc" = 0 ]; then s=$(status_of "$res"); m=$(message_of "$res")
+      elif [ "$rc" = 255 ]; then
+        case "$err" in *"Permission denied"*|*"Host key verification failed"*|*"verification failed"*) s=auth ;; *) s=down ;; esac
+        m=$err
+      else s=nopy; m=$err; fi
+      STAT[$i]=$s MSG[$i]=$m
+      case "$s" in change) TODO+=("$i") ;; auth) RETRY+=("$i") ;; esac
+      i=$((i + 1))
+    done
+    label() {
+      case "$1" in
+        same) say "이미 적용" ;; off) say "이미 전부 끔" ;; change) say "바꿀 곳" ;; skip) say "Claude Code 없음" ;;
+        auth) say "키로 접속 안 됨" ;; down) say "접속 안 됨" ;; nopy) say "python 없음" ;; error) say "오류" ;; *) say "$1" ;;
+      esac
+    }
+    say ""
+    i=0
+    for h in "${HOSTS[@]}"; do
+      printf '  %3s  %-20s [%s] %s\n' "$((i + 1))" "$h" "$(label "${STAT[$i]}")" "${MSG[$i]}"
+      i=$((i + 1))
+    done
+
+    pick() {   # pick "질문" 후보번호들… → PICKED(0부터 번호)
+      local q=$1; shift; local -a cand=("$@"); PICKED=()
+      local nums="" k; for k in "${cand[@]}"; do nums="$nums $((k + 1))"; done
+      ask "$q
+  (엔터=전부:${nums} / 번호를 띄어 쓰기 / n=건너뛰기)" all
+      case "$REPLY" in n|N|no|아니) return ;; all|a|A|전부) PICKED=("${cand[@]}"); return ;; esac
+      for k in $REPLY; do
+        [ "$k" -eq "$k" ] 2>/dev/null && [ "$k" -ge 1 ] && [ "$k" -le ${#HOSTS[@]} ] && PICKED+=("$((k - 1))")
+      done
+    }
+    apply_one() {   # apply_one batch|interactive 번호
+      local k=$2 h=${HOSTS[$2]}
+      printf '  %-18s ' "$h"
+      if run_remote "$1" "$h" $DRY; then
+        say "$(message_of "$RESULT")"
+        case "$(status_of "$RESULT")" in done) CHANGED=$((CHANGED + 1)) ;; error) FAILED=$((FAILED + 1)) ;; esac
+      else
+        say "실패: $SSHERR"; FAILED=$((FAILED + 1))
+      fi
+    }
+
+    if [ ${#TODO[@]} -gt 0 ]; then
+      say ""
+      if [ -n "$DRY" ]; then say "  바꿀 곳 ${#TODO[@]}곳(미리보기라 바꾸지 않음)."
+      else
+        pick "  바꿀 곳 ${#TODO[@]}곳에 적용할까요?" "${TODO[@]}"
+        # 같은 기계를 가리키는 별칭이 겹쳐도 안전하게 차례로
+        for k in ${PICKED[@]+"${PICKED[@]}"}; do apply_one batch "$k"; done
+      fi
+    else
+      say ""; say "  키로 접속되는 호스트 중 바꿀 곳은 없습니다."
+    fi
+
+    if [ ${#RETRY[@]} -gt 0 ] && [ "$YES" = 0 ] && [ -n "$TTY" ]; then
+      say ""
+      PICKED=()
+      ask "  키로 접속하지 못한 ${#RETRY[@]}곳을 비밀번호(대화형)로 시도할까요?
+  (번호를 띄어 쓰기 / 엔터=건너뛰기)" n
+      case "$REPLY" in n|N|no|아니) ;; *) for k in $REPLY; do
+        [ "$k" -eq "$k" ] 2>/dev/null && [ "$k" -ge 1 ] && [ "$k" -le ${#HOSTS[@]} ] && PICKED+=("$((k - 1))"); done ;; esac
+      for k in ${PICKED[@]+"${PICKED[@]}"}; do apply_one interactive "$k"; done
+    fi
+  fi
+
+  # 목록에 없는 호스트
+  if [ "$YES" = 0 ] && [ -n "$TTY" ] && [ ${#ONLY[@]} -eq 0 ]; then
+    say ""
+    ask "  목록에 없는 호스트도 할까요? (user@host 또는 user@host:port, 여러 곳은 띄어 쓰기, 엔터=건너뛰기)" ""
+    if [ -n "$REPLY" ]; then
+      for h in $REPLY; do
+        HOSTS+=("$h"); apply_one interactive $((${#HOSTS[@]} - 1))
+      done
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------- 3. 저장소(클라우드 세션)
+step "3. 저장소(클라우드 세션용, 선택)"
+say "  클라우드(claude.ai/code) 세션은 개인 설정을 읽지 않고 저장소의 .claude/settings.json만 읽습니다."
+if [ ${#PROJECTS[@]} -eq 0 ] && [ "$YES" = 0 ] && [ -n "$TTY" ]; then
+  root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+  if [ -n "$root" ]; then
+    ask "  넣을 저장소 폴더(엔터=지금 저장소 $root, n=건너뛰기)" "$root"
+  else
+    ask "  넣을 저장소 폴더(엔터=건너뛰기)" n
+  fi
+  case "$REPLY" in n|N|no|아니|"") ;; *) PROJECTS+=("$REPLY") ;; esac
+fi
+if [ ${#PROJECTS[@]} -eq 0 ]; then
+  say "  건너뜀"
+else
+  for dir in "${PROJECTS[@]}"; do
+    dir=${dir/#\~/$HOME}
+    if [ ! -d "$dir" ]; then say "  $dir: 폴더가 없음"; FAILED=$((FAILED + 1)); continue; fi
+    r=$("$PY" -c "$MERGE_PY" "$(cd "$dir" && pwd)/.claude/settings.json" --project $DRY)
+    say "  $(message_of "$r")"
+    case "$(status_of "$r")" in
+      done) CHANGED=$((CHANGED + 1)); say "  커밋해야 클라우드 세션에 반영됩니다: git -C \"$dir\" add .claude/settings.json" ;;
+      error) FAILED=$((FAILED + 1)) ;;
+    esac
+  done
+fi
+
+# ---------------------------------------------------------------- 끝
+step "끝"
+if [ -n "$DRY" ]; then say "  미리보기였습니다. 바꾸려면 -n 없이 다시 실행하세요."
+else say "  바꾼 곳 ${CHANGED}곳, 실패 ${FAILED}곳. 실행 중인 Claude Code 세션도 설정 파일을 다시 읽어 바로 반영됩니다."; fi
+[ "$FAILED" -eq 0 ]

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# 시험용 가짜 ssh: 옵션은 넘기고, 대상 이름의 가짜 홈($FAKEROOT/<대상>)에서 받은 명령을 이 컴퓨터로 실행한다.
+#   down = 접속 안 됨, auth = 키 인증 거부. -G는 호스트마다 다른 hostname을 돌려준다(같은 곳 합치기 시험)
+args=(); G=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -G) G=1 ;;
+    -o|-p|-l|-i|-F|-J) shift ;;
+    -*) ;;
+    *) args+=("$1") ;;
+  esac
+  shift
+done
+dest=${args[0]}; cmd=${args[*]:1}
+if [ "$G" = 1 ]; then printf 'hostname %s.test\nuser u\nport 22\n' "$dest"; exit 0; fi
+case "$dest" in
+  down) echo "ssh: connect to host down port 22: Operation timed out" >&2; exit 255 ;;
+  auth) echo "u@auth: Permission denied (publickey,password)." >&2; exit 255 ;;
+esac
+echo "Welcome! (셸 시작 파일이 글을 찍는 서버 흉내)"
+HOME="$FAKEROOT/$dest" bash -c "$cmd"
