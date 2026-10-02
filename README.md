@@ -13,7 +13,15 @@ Claude Code가 git 커밋 · PR에 붙이는 표시를 **한 번에 끄는 대�
 ## 설치
 
 ```bash
-gh repo clone imnimgnos/claude-no-attribution
+mkdir -p ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/imnimgnos/claude-no-attribution/main/claude-no-attribution -o ~/.local/bin/claude-no-attribution
+chmod +x ~/.local/bin/claude-no-attribution
+```
+
+또는 저장소째:
+
+```bash
+git clone https://github.com/imnimgnos/claude-no-attribution.git
 install -m 755 claude-no-attribution/claude-no-attribution ~/.local/bin/
 ```
 
